@@ -139,15 +139,13 @@ def sanitize_filename(name):
 
 # --- MIDDLEWARE ---
 
-@app.middleware()
-async def ban_check(_, __, msg: Message, proceed):
-    if msg.from_user and is_banned(msg.from_user.id):
-        try:
-            await msg.reply("🚫 You are banned from using this bot.")
-        except:
-            pass
+@app.on_message(filters.private)
+async def some_handler(client, message: Message):
+    user_id = message.from_user.id if message.from_user else None
+    if is_banned(user_id):
+        await message.reply("🚫 You are banned from using this bot.")
         return
-    await proceed()
+    # continue handling message
 
 # --- START COMMAND ---
 
