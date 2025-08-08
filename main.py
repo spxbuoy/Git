@@ -3,54 +3,41 @@ import re
 import json
 import aiohttp
 import asyncio
-import tempfile
-from typing import Any, Dict, Optional
 from pyrogram import Client, filters
-from pyrogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
+from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-# ------------- CONFIG ----------------
+# ------------- CONFIG -------------
 API_ID = int(os.getenv("API_ID", "20660797"))
 API_HASH = os.getenv("API_HASH", "755e5cdf9bade62a75211e7a57f25601")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8448084086:AAGT6-0n3g3OkQDYxxlyXdJESsYmjX9_ISA")
-ADMINS = [int(x) for x in os.getenv("7941175119", "").split(",") if x.strip()]
+ADMINS = [int(x) for x in os.getenv("ADMINS", "7941175119").split(",") if x.strip()]
 DATA_FILE = "data.json"
 ITEMS_PER_PAGE = 6
+# ----------------------------------
 
-# ------------- DATA STORAGE --------------
-def load_data() -> Dict[str, Any]:
+# Load and save data helpers
+def load_data():
     if not os.path.exists(DATA_FILE):
         return {"tokens": {}, "banned": []}
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def save_data(d: Dict[str, Any]) -> None:
+def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(d, f, indent=2)
+        json.dump(data, f, indent=2)
 
 data = load_data()
 
-# ------------- STATES -------------------
-user_states: Dict[int, Dict[str, Any]] = {}
-admin_states: Dict[int, Dict[str, Any]] = {}
+# States for users/admins awaiting input
+user_states = {}
+admin_states = {}
 
-# ------------- HELPERS ------------------
+# Filter to ignore banned users
 def not_banned_filter(_, __, message: Message):
-    return (message.from_user and (message.from_user.id not in set(data.get("banned", []))))
+    return message.from_user and (message.from_user.id not in set(data.get("banned", [])))
 
-def is_admin(uid: int) -> bool:
-    return uid in ADMINS
-
-def make_back_keyboard(text="Back to menu"):
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(text, callback_data="start_back")]]
-    )
-
-def extract_github_username_from_text(text: str) -> Optional[str]:
+# Helper: extract github username from input
+def extract_github_username(text: str):
     if not text:
         return None
     m = re.search(r"github\.com/([A-Za-z0-9\-_.]+)", text, re.IGNORECASE)
@@ -60,121 +47,164 @@ def extract_github_username_from_text(text: str) -> Optional[str]:
         return text.strip()
     return None
 
-async def gh_request(session: aiohttp.ClientSession, method: str, url: str, token: Optional[str] = None, **kwargs):
+# Helper: build back button keyboard
+def back_button(text="◀️ Back"):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(text, callback_data="start")]])
+
+# Helper: paginated keyboard builder
+def paginate_buttons(items, prefix, page=0, per_page=ITEMS_PER_PAGE):
+    max_page = (len(items) - 1) // per_page
+    page = max(0, min(page, max_page))
+    buttons = []
+    for item in items[page*per_page:(page+1)*per_page]:
+        buttons.append([InlineKeyboardButton(item["label"], callback_data=f"{prefix}:{item['data']}")])
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"{prefix}_page:{page-1}"))
+    if page < max_page:
+        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"{prefix}_page:{page+1}"))
+    if nav_buttons:
+        buttons.append(nav_buttons)
+    buttons.append([InlineKeyboardButton("◀️ Back", callback_data="start")])
+    return InlineKeyboardMarkup(buttons)
+
+# GitHub API request wrapper
+async def gh_request(session, method, url, token=None, **kwargs):
     headers = kwargs.pop("headers", {})
     if token:
-        headers.update({"Authorization": f"token {token}"})
-    headers.update({"Accept": "application/vnd.github.v3+json", "User-Agent": "Spilux-GitHub-Bot"})
+        headers["Authorization"] = f"token {token}"
+    headers["Accept"] = "application/vnd.github.v3+json"
+    headers["User-Agent"] = "Spilux-GitHub-Bot"
     async with session.request(method, url, headers=headers, **kwargs) as resp:
         try:
-            body = await resp.json()
+            return resp.status, await resp.json()
         except:
-            body = await resp.text()
-        return resp.status, body
+            return resp.status, await resp.text()
 
-async def download_repo_zip(token: Optional[str], full_name: str) -> Optional[bytes]:
-    """
-    Download repo as ZIP archive via GitHub API.
-    If token is None, only public repos will work.
-    """
-    url = f"https://api.github.com/repos/{full_name}/zipball"
-    async with aiohttp.ClientSession() as session:
-        status, data = await gh_request(session, "GET", url, token)
-        if status == 200:
-            # data is binary ZIP content
-            return await session.get(url, headers={"Authorization": f"token {token}"} if token else None).then(lambda r: r.read())
-        else:
-            return None
-
-# ------------- APP --------------------
 app = Client("github_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# --------- START / MAIN MENU -----------
+# --------------------------------
+# MAIN MENU
+# --------------------------------
 @app.on_message(filters.private & filters.command("start") & filters.create(not_banned_filter))
-async def cmd_start(_, msg: Message):
+async def start_menu(_, msg: Message):
     uid = msg.from_user.id
-    # Ensure user record
     data.setdefault("tokens", {})
     rec = data["tokens"].setdefault(str(uid), {"first_name": msg.from_user.first_name or "", "tokens": {}, "active": None})
     rec.setdefault("first_name", msg.from_user.first_name or "")
     save_data(data)
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔑 Add Token", callback_data="add_token")],
-        [InlineKeyboardButton("🔁 Switch Token", callback_data="switch_token_menu")],
-        [InlineKeyboardButton("📂 My Repos", callback_data="list_repos")],
-        [InlineKeyboardButton("📤 Upload ZIP to Repo", callback_data="upload_zip_repo")],
-        [InlineKeyboardButton("🔍 Search GitHub User", callback_data="search_user"),
-         InlineKeyboardButton("🔎 Search Repos (keyword)", callback_data="search_repo")],
-        [InlineKeyboardButton("📈 Trending", callback_data="trending"),
-         InlineKeyboardButton("🎲 Random Repo", callback_data="random_repo")],
-        [InlineKeyboardButton("🧾 Gist Create", callback_data="gist_create"),
-         InlineKeyboardButton("📊 GH Stats", callback_data="ghstats")],
+        [InlineKeyboardButton("🔑 Add Token", callback_data="token_add")],
+        [InlineKeyboardButton("🔁 Switch Token", callback_data="token_switch_list")],
+        [InlineKeyboardButton("🗑 Remove Token", callback_data="token_remove_list")],
+        [InlineKeyboardButton("📂 My Repos", callback_data="myrepos_page:0")],
+        [InlineKeyboardButton("📤 Upload ZIP to Repo", callback_data="upload_zip")],
+        [InlineKeyboardButton("🔍 Search GitHub User", callback_data="search_user")],
+        [InlineKeyboardButton("🔎 Search Repos (keyword)", callback_data="search_repo")],
+        [InlineKeyboardButton("📈 Trending Repos", callback_data="trending")],
+        [InlineKeyboardButton("🎲 Random Repo", callback_data="random_repo")],
+        [InlineKeyboardButton("🧾 Create Gist", callback_data="gist_create")],
+        [InlineKeyboardButton("⭐ Star a Repo", callback_data="star_repo_prompt")],
+        [InlineKeyboardButton("📊 GitHub API Stats", callback_data="gh_stats")]
     ])
-    if is_admin(uid):
-        kb.inline_keyboard.append([InlineKeyboardButton("👥 Admin Panel", callback_data="admin_panel")])
+    if uid in ADMINS:
+        kb.keyboard.append([InlineKeyboardButton("👥 Admin Panel", callback_data="admin_panel")])
 
-    await msg.reply("👋 Welcome! Press a button to run a feature.", reply_markup=kb)
-    user_states.pop(uid, None)
+    await msg.reply("👋 Welcome to Spilux GitHub Bot! Select an option:", reply_markup=kb)
 
-# -------- CALLBACK QUERY HANDLER -----------
-@app.on_callback_query(filters.create(lambda _, __, cq: True))
-async def cb_menu(_, cq: CallbackQuery):
-    uid = cq.from_user.id
+# --------------------------------
+# CALLBACK QUERY HANDLER
+# --------------------------------
+@app.on_callback_query()
+async def cb_handler(_, cq: CallbackQuery):
     data_cb = cq.data or ""
+    uid = cq.from_user.id
 
-    # Back to main menu
-    if data_cb == "start_back":
-        await cmd_start(_, cq.message)
-        await cq.answer()
-        user_states.pop(uid, None)
-        admin_states.pop(uid, None)
-        return
-
-    # ADD TOKEN flow
-    if data_cb == "add_token":
-        user_states[uid] = {"action": "awaiting_add_token"}
-        await cq.message.edit("🔑 Send your GitHub Personal Access Token (PAT).\n\nSend 'Back' to cancel.", reply_markup=make_back_keyboard())
+    # Route callback data
+    if data_cb == "start":
+        await start_menu(_, cq.message)
         await cq.answer()
         return
 
-    # SWITCH TOKEN menu
-    if data_cb == "switch_token_menu":
+    if data_cb == "token_add":
+        user_states[uid] = {"action": "await_add_token"}
+        await cq.message.edit("🔑 Please send your GitHub Personal Access Token (PAT).", reply_markup=back_button())
+        await cq.answer()
+        return
+
+    if data_cb == "token_switch_list":
         rec = data.get("tokens", {}).get(str(uid), {})
-        saved = rec.get("tokens", {})
-        if not saved:
-            await cq.answer("You have no tokens saved. Add one first.", show_alert=True)
+        tokens = rec.get("tokens", {})
+        if not tokens:
+            await cq.answer("You have no saved tokens.", show_alert=True)
             return
-        kb = []
-        for tkn, meta in saved.items():
-            name = meta.get("username", "unknown")
-            active = rec.get("active") == tkn
-            label = f"{name}{' (active)' if active else ''}"
-            kb.append([InlineKeyboardButton(label, callback_data=f"switchtoken_btn:{name}")])
-        kb.append([InlineKeyboardButton("❌ Cancel", callback_data="start_back")])
-        await cq.message.edit("🔁 Choose a token to activate:", reply_markup=InlineKeyboardMarkup(kb))
+        items = [{"label": f"{meta.get('username', 'unknown')}{' (active)' if rec.get('active')==tkn else ''}", "data": tkn} for tkn, meta in tokens.items()]
+        kb = paginate_buttons(items, "token_switch", 0)
+        await cq.message.edit("🔁 Select a token to activate:", reply_markup=kb)
         await cq.answer()
         return
 
-    if data_cb.startswith("switchtoken_btn:"):
-        name = data_cb.split(":",1)[1]
+    if data_cb.startswith("token_switch:"):
+        tkn = data_cb.split(":", 1)[1]
         rec = data.get("tokens", {}).get(str(uid), {})
-        found = None
-        for tkn, meta in rec.get("tokens", {}).items():
-            if meta.get("username") == name:
-                found = tkn
-                break
-        if not found:
+        if tkn not in rec.get("tokens", {}):
             await cq.answer("Token not found.", show_alert=True)
             return
-        data["tokens"][str(uid)]["active"] = found
+        data["tokens"][str(uid)]["active"] = tkn
         save_data(data)
-        await cq.message.edit(f"✅ Active token switched to **{name}**.", reply_markup=make_back_keyboard())
+        await cq.message.edit("✅ Active token switched.", reply_markup=back_button())
         await cq.answer()
         return
 
-    # LIST REPOS
-    if data_cb == "list_repos":
+    if data_cb.startswith("token_switch_page:"):
+        page = int(data_cb.split(":")[1])
+        rec = data.get("tokens", {}).get(str(uid), {})
+        tokens = rec.get("tokens", {})
+        items = [{"label": f"{meta.get('username', 'unknown')}{' (active)' if rec.get('active')==tkn else ''}", "data": tkn} for tkn, meta in tokens.items()]
+        kb = paginate_buttons(items, "token_switch", page)
+        await cq.message.edit("🔁 Select a token to activate:", reply_markup=kb)
+        await cq.answer()
+        return
+
+    if data_cb == "token_remove_list":
+        rec = data.get("tokens", {}).get(str(uid), {})
+        tokens = rec.get("tokens", {})
+        if not tokens:
+            await cq.answer("You have no saved tokens.", show_alert=True)
+            return
+        items = [{"label": meta.get("username", "unknown"), "data": tkn} for tkn, meta in tokens.items()]
+        kb = paginate_buttons(items, "token_remove", 0)
+        await cq.message.edit("🗑 Select a token to remove:", reply_markup=kb)
+        await cq.answer()
+        return
+
+    if data_cb.startswith("token_remove:"):
+        tkn = data_cb.split(":", 1)[1]
+        rec = data.get("tokens", {}).get(str(uid), {})
+        if tkn not in rec.get("tokens", {}):
+            await cq.answer("Token not found.", show_alert=True)
+            return
+        rec["tokens"].pop(tkn)
+        if rec.get("active") == tkn:
+            rec["active"] = next(iter(rec["tokens"]), None)
+        save_data(data)
+        await cq.message.edit("✅ Token removed.", reply_markup=back_button())
+        await cq.answer()
+        return
+
+    if data_cb.startswith("token_remove_page:"):
+        page = int(data_cb.split(":")[1])
+        rec = data.get("tokens", {}).get(str(uid), {})
+        tokens = rec.get("tokens", {})
+        items = [{"label": meta.get("username", "unknown"), "data": tkn} for tkn, meta in tokens.items()]
+        kb = paginate_buttons(items, "token_remove", page)
+        await cq.message.edit("🗑 Select a token to remove:", reply_markup=kb)
+        await cq.answer()
+        return
+
+    if data_cb.startswith("myrepos_page:"):
+        page = int(data_cb.split(":")[1])
         rec = data.get("tokens", {}).get(str(uid), {})
         token = rec.get("active")
         if not token:
@@ -182,400 +212,668 @@ async def cb_menu(_, cq: CallbackQuery):
             return
         await cq.message.edit("📚 Fetching your repositories...", reply_markup=None)
         async with aiohttp.ClientSession() as session:
-            st, repos = await gh_request(session, "GET", "https://api.github.com/user/repos?per_page=200", token)
+            st, repos = await gh_request(session, "GET", "https://api.github.com/user/repos?per_page=100", token)
             if st != 200:
-                await cq.message.edit("❌ Failed to fetch repos (token may be invalid).", reply_markup=make_back_keyboard())
+                await cq.message.edit("❌ Failed to fetch repos. Token may be invalid.", reply_markup=back_button())
                 return
             if not repos:
-                await cq.message.edit("⚠️ No repositories found.", reply_markup=make_back_keyboard())
+                await cq.message.edit("⚠️ No repositories found.", reply_markup=back_button())
                 return
-            kb = []
-            for r in repos:
-                kb.append([InlineKeyboardButton(r.get("name"), callback_data=f"myrepo:{r.get('full_name')}")])
-            kb.append([InlineKeyboardButton("◀️ Back", callback_data="start_back")])
-            await cq.message.edit("📚 Your repos:", reply_markup=InlineKeyboardMarkup(kb))
-        await cq.answer()
+            items = [{"label": r.get("name"), "data": r.get("full_name")} for r in repos]
+            kb = paginate_buttons(items, "myrepo", page)
+            await cq.message.edit("📚 Your Repositories:", reply_markup=kb)
+            await cq.answer()
         return
 
     if data_cb.startswith("myrepo:"):
         full_name = data_cb.split(":", 1)[1]
-        rec = data.get("tokens", {}).get(str(uid), {})
-        token = rec.get("active")
-        await cq.answer("Preparing download...")
-        if not token:
-            # Public repo fallback
-            url = f"https://github.com/{full_name}/archive/refs/heads/main.zip"
-            await cq.message.edit(f"Public repo download link:\n{url}", reply_markup=make_back_keyboard())
-            return
-        # Try downloading repo ZIP
-        zip_url = f"https://api.github.com/repos/{full_name}/zipball"
-        # Send a direct download link for the ZIP (with token in header, can't send direct URL with token)
-        # Best: send public URL or fail gracefully
-        try:
-            # Download the zip file
-            async with aiohttp.ClientSession() as session:
-                headers = {"Authorization": f"token {token}"}
-                async with session.get(zip_url, headers=headers) as resp:
-                    if resp.status != 200:
-                        await cq.message.edit("❌ Failed to download repo archive. Maybe private or token invalid.", reply_markup=make_back_keyboard())
-                        return
-                    data_bytes = await resp.read()
-                    # Send file
-                    await cq.message.reply_document(data_bytes, file_name=f"{full_name.replace('/', '_')}.zip")
-                    await cq.answer()
-                    await cq.message.edit(f"✅ Downloaded repository `{full_name}`.", reply_markup=make_back_keyboard())
-        except Exception as e:
-            await cq.message.edit(f"❌ Error: {e}", reply_markup=make_back_keyboard())
+        await cq.answer("Downloading repo ZIP...")
+        await send_repo_zip(cq=cq, full_name=full_name, user_id=uid)
         return
 
-    # UPLOAD ZIP placeholder
-    if data_cb == "upload_zip_repo":
-        user_states[uid] = {"action": "awaiting_zip_upload"}
-        await cq.message.edit("📤 Please send the ZIP file now.\nSend 'Back' to cancel.", reply_markup=make_back_keyboard())
-        await cq.answer()
-        return
-
-    # SEARCH USER
-    if data_cb == "search_user":
-        user_states[uid] = {"action": "awaiting_search_user"}
-        await cq.message.edit("🔎 Send a GitHub username or profile URL (e.g. https://github.com/username).\nSend 'Back' to cancel.", reply_markup=make_back_keyboard())
-        await cq.answer()
-        return
-
-    # SEARCH REPO
-    if data_cb == "search_repo":
-        user_states[uid] = {"action": "awaiting_search_repo"}
-        await cq.message.edit("🔎 Send a keyword to search public repositories.\nSend 'Back' to cancel.", reply_markup=make_back_keyboard())
-        await cq.answer()
-        return
-
-    # TRENDING placeholder
-    if data_cb == "trending":
-        await cq.answer("Fetching trending...", show_alert=False)
-        await cq.message.edit("🔝 Trending repos feature coming soon!", reply_markup=make_back_keyboard())
-        return
-
-    # RANDOM REPO placeholder
-    if data_cb == "random_repo":
-        await cq.answer("Finding a random popular repo...", show_alert=False)
-        await cq.message.edit("🎲 Random repo feature coming soon!", reply_markup=make_back_keyboard())
-        return
-
-    # GIST CREATE
-    if data_cb == "gist_create":
-        user_states[uid] = {"action": "awaiting_gist_create", "public": True}
-        await cq.message.edit("🧾 Send gist content (plain text or JSON for multiple files).\nSend 'Back' to cancel.", reply_markup=make_back_keyboard())
-        await cq.answer()
-        return
-
-    # GH STATS placeholder
-    if data_cb == "ghstats":
+    if data_cb.startswith("myrepo_page:"):
+        page = int(data_cb.split(":")[1])
         rec = data.get("tokens", {}).get(str(uid), {})
         token = rec.get("active")
         if not token:
-            await cq.answer("No active token.", show_alert=True)
+            await cq.answer("No active token. Add one first.", show_alert=True)
             return
         async with aiohttp.ClientSession() as session:
-            st, stats = await gh_request(session, "GET", "https://api.github.com/rate_limit", token)
+            st, repos = await gh_request(session, "GET", "https://api.github.com/user/repos?per_page=100", token)
             if st != 200:
-                await cq.answer("Failed to fetch stats.", show_alert=True)
+                await cq.message.edit("❌ Failed to fetch repos. Token may be invalid.", reply_markup=back_button())
                 return
-            limit = stats.get("rate", {})
-            text = (
-                f"GitHub API Rate Limits:\n"
-                f"Limit: {limit.get('limit')}\n"
-                f"Remaining: {limit.get('remaining')}\n"
-                f"Reset: <code>{limit.get('reset')}</code>"
-            )
-            await cq.message.edit(text, reply_markup=make_back_keyboard())
+            if not repos:
+                await cq.message.edit("⚠️ No repositories found.", reply_markup=back_button())
+                return
+            items = [{"label": r.get("name"), "data": r.get("full_name")} for r in repos]
+            kb = paginate_buttons(items, "myrepo", page)
+            await cq.message.edit("📚 Your Repositories:", reply_markup=kb)
+            await cq.answer()
+        return
+
+    if data_cb == "search_user":
+        user_states[uid] = {"action": "search_user"}
+        await cq.message.edit("🔎 Send a GitHub username or profile URL to search for repos:", reply_markup=back_button())
+        await cq.answer()
+        return
+
+    if data_cb == "search_repo":
+        user_states[uid] = {"action": "search_repo"}
+        await cq.message.edit("🔎 Send a keyword to search public repositories:", reply_markup=back_button())
+        await cq.answer()
+        return
+
+    if data_cb.startswith("userrepo_page:"):
+        # pagination for user repos (admin or user)
+        params = data_cb.split(":")[1]
+        username, page = params.split("|")
+        page = int(page)
+        await send_user_repos(cq, username, page)
+        return
+
+    if data_cb.startswith("userrepo:"):
+        full_name = data_cb.split(":", 1)[1]
+        await cq.answer("Downloading repo ZIP...")
+        await send_repo_zip(cq=cq, full_name=full_name, user_id=uid)
+        return
+
+    if data_cb.startswith("searchrepo_page:"):
+        page = int(data_cb.split(":")[1])
+        keyword = user_states.get(uid, {}).get("search_keyword")
+        if not keyword:
+            await cq.answer("Session expired. Please search again.", show_alert=True)
+            return
+        await send_search_repos(cq, keyword, page)
+        return
+
+    if data_cb.startswith("searchrepo:"):
+        full_name = data_cb.split(":", 1)[1]
+        await cq.answer("Downloading repo ZIP...")
+        await send_repo_zip(cq=cq, full_name=full_name, user_id=uid)
+        return
+
+    if data_cb == "random_repo":
+        await cq.answer("Fetching random repo...")
+        await random_repo(cq)
+        return
+
+    if data_cb.startswith("forkrepo:"):
+        full_name = data_cb.split(":", 1)[1]
+        await fork_repo(cq, full_name, uid)
+        return
+
+    if data_cb == "upload_zip":
+        user_states[uid] = {"action": "upload_zip"}
+        await cq.message.edit("📤 Send the ZIP file to upload to a repo.", reply_markup=back_button())
+        await cq.answer()
+        return
+
+    if data_cb == "gist_create":
+        user_states[uid] = {"action": "gist_create"}
+        await cq.message.edit("🧾 Send gist content as plain text or JSON for multiple files.", reply_markup=back_button())
+        await cq.answer()
+        return
+
+    if data_cb == "gh_stats":
+        await cq.answer("Fetching GitHub API rate limits...")
+        await gh_stats(cq)
+        return
+
+    if data_cb == "star_repo_prompt":
+        user_states[uid] = {"action": "star_repo"}
+        await cq.message.edit("⭐ Send full repo name (owner/repo) to star:", reply_markup=back_button())
         await cq.answer()
         return
 
     # ADMIN PANEL
     if data_cb == "admin_panel":
-        if not is_admin(uid):
+        if uid not in ADMINS:
             await cq.answer("Unauthorized", show_alert=True)
             return
-        kb = [
-            [InlineKeyboardButton("👥 List Users", callback_data="admin_list_users")],
-            [InlineKeyboardButton("📂 Manage User Repos", callback_data="admin_manage_user")],
-            [InlineKeyboardButton("🚫 Ban User", callback_data="admin_ban_user")],
-            [InlineKeyboardButton("◀️ Back", callback_data="start_back")]
-        ]
-        await cq.message.edit("👑 Admin Panel", reply_markup=InlineKeyboardMarkup(kb))
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 List Users", callback_data="admin_list_users_page:0")],
+            [InlineKeyboardButton("❌ Ban User", callback_data="admin_ban_user")],
+            [InlineKeyboardButton("✅ Unban User", callback_data="admin_unban_user")],
+            [InlineKeyboardButton("📢 Broadcast Message", callback_data="admin_broadcast")],
+            [InlineKeyboardButton("📈 Bot Stats", callback_data="admin_bot_stats")],
+            [InlineKeyboardButton("◀️ Back", callback_data="start")],
+        ])
+        await cq.message.edit("👥 Admin Panel:", reply_markup=kb)
         await cq.answer()
         return
 
-    # ADMIN LIST USERS
-    if data_cb == "admin_list_users":
-        if not is_admin(uid):
+    if data_cb.startswith("admin_list_users_page:"):
+        if uid not in ADMINS:
             await cq.answer("Unauthorized", show_alert=True)
             return
-        users = data.get("tokens", {})
-        if not users:
-            await cq.message.edit("No users found.", reply_markup=make_back_keyboard())
-            return
-        kb = []
-        for u in users.keys():
-            uname = users[u].get("first_name", "unknown")
-            active_tkn = users[u].get("active")
-            gh_name = "N/A"
-            if active_tkn:
-                gh_name = users[u]["tokens"].get(active_tkn, {}).get("username", "N/A")
-            kb.append([InlineKeyboardButton(f"{uname} ({gh_name})", callback_data=f"admin_user:{u}")])
-        kb.append([InlineKeyboardButton("◀️ Back", callback_data="admin_panel")])
-        await cq.message.edit("👥 Users:", reply_markup=InlineKeyboardMarkup(kb))
-        await cq.answer()
+        page = int(data_cb.split(":")[1])
+        await admin_list_users(cq, page)
         return
 
-    # ADMIN USER selected - manage repos
-    if data_cb.startswith("admin_user:"):
-        if not is_admin(uid):
+    if data_cb.startswith("admin_view_user:"):
+        if uid not in ADMINS:
             await cq.answer("Unauthorized", show_alert=True)
             return
-        target_uid = data_cb.split(":",1)[1]
-        admin_states[uid] = {"target_uid": target_uid}
-        kb = [
-            [InlineKeyboardButton("📂 List Repos", callback_data=f"admin_list_repos:{target_uid}")],
-            [InlineKeyboardButton("➕ Create Repo", callback_data=f"admin_create_repo:{target_uid}")],
-            [InlineKeyboardButton("◀️ Back", callback_data="admin_list_users")]
-        ]
-        await cq.message.edit(f"Manage user {target_uid}:", reply_markup=InlineKeyboardMarkup(kb))
-        await cq.answer()
+        user_id_str = data_cb.split(":",1)[1]
+        await admin_view_user_repos(cq, user_id_str, 0)
         return
 
-    # ADMIN LIST REPOS FOR USER
-    if data_cb.startswith("admin_list_repos:"):
-        if not is_admin(uid):
+    if data_cb.startswith("admin_view_user_repopage:"):
+        if uid not in ADMINS:
             await cq.answer("Unauthorized", show_alert=True)
             return
-        target_uid = data_cb.split(":",1)[1]
-        user_rec = data.get("tokens", {}).get(target_uid, {})
-        active_tkn = user_rec.get("active")
-        if not active_tkn:
-            await cq.message.edit("User has no active token.", reply_markup=make_back_keyboard())
-            return
-        token = active_tkn
-        async with aiohttp.ClientSession() as session:
-            st, repos = await gh_request(session, "GET", "https://api.github.com/user/repos?per_page=200", token)
-            if st != 200:
-                await cq.message.edit("Failed to fetch repos.", reply_markup=make_back_keyboard())
-                return
-            if not repos:
-                await cq.message.edit("User has no repos.", reply_markup=make_back_keyboard())
-                return
-            kb = []
-            for r in repos:
-                full_name = r.get("full_name")
-                kb.append([InlineKeyboardButton(r.get("name"), callback_data=f"admin_repo_download:{target_uid}:{full_name}")])
-            kb.append([InlineKeyboardButton("◀️ Back", callback_data=f"admin_user:{target_uid}")])
-            await cq.message.edit(f"Repos for user {target_uid}:", reply_markup=InlineKeyboardMarkup(kb))
-        await cq.answer()
+        params = data_cb.split(":",1)[1]
+        user_id_str, page = params.split("|")
+        page = int(page)
+        await admin_view_user_repos(cq, user_id_str, page)
         return
 
-    # ADMIN REPO DOWNLOAD
-    if data_cb.startswith("admin_repo_download:"):
-        if not is_admin(uid):
+    if data_cb.startswith("admin_ban_user_confirm:"):
+        if uid not in ADMINS:
             await cq.answer("Unauthorized", show_alert=True)
             return
-        parts = data_cb.split(":", 2)
-        target_uid, full_name = parts[1], parts[2]
-        user_rec = data.get("tokens", {}).get(target_uid, {})
-        active_tkn = user_rec.get("active")
-        if not active_tkn:
-            await cq.message.edit("User has no active token.", reply_markup=make_back_keyboard())
-            return
-        token = active_tkn
-        await cq.answer("Downloading repo...")
-        zip_url = f"https://api.github.com/repos/{full_name}/zipball"
+        user_id_str = data_cb.split(":",1)[1]
         try:
-            async with aiohttp.ClientSession() as session:
-                headers = {"Authorization": f"token {token}"}
-                async with session.get(zip_url, headers=headers) as resp:
-                    if resp.status != 200:
-                        await cq.message.edit("Failed to download repo archive.", reply_markup=make_back_keyboard())
-                        return
-                    data_bytes = await resp.read()
-                    await cq.message.reply_document(data_bytes, file_name=f"{full_name.replace('/', '_')}.zip")
-                    await cq.answer()
-                    await cq.message.edit(f"✅ Downloaded repo `{full_name}`.", reply_markup=make_back_keyboard())
-        except Exception as e:
-            await cq.message.edit(f"Error: {e}", reply_markup=make_back_keyboard())
-        return
-
-    # ADMIN CREATE REPO (start input)
-    if data_cb.startswith("admin_create_repo:"):
-        if not is_admin(uid):
-            await cq.answer("Unauthorized", show_alert=True)
+            uid_ban = int(user_id_str)
+        except:
+            await cq.answer("Invalid user ID.", show_alert=True)
             return
-        target_uid = data_cb.split(":",1)[1]
-        admin_states[uid] = {"action": "admin_awaiting_create_repo", "target_uid": target_uid}
-        await cq.message.edit("Send the new repo name.\nSend 'Back' to cancel.", reply_markup=make_back_keyboard())
+        if uid_ban in data.get("banned", []):
+            await cq.answer("User already banned.", show_alert=True)
+            return
+        data.setdefault("banned", []).append(uid_ban)
+        save_data(data)
+        await cq.message.edit(f"✅ User {uid_ban} banned.", reply_markup=back_button())
         await cq.answer()
         return
 
-    # ADMIN BAN USER (placeholder)
-    if data_cb == "admin_ban_user":
-        await cq.answer("Ban user feature coming soon.", show_alert=True)
+    if data_cb.startswith("admin_unban_user_confirm:"):
+        if uid not in ADMINS:
+            await cq.answer("Unauthorized", show_alert=True)
+            return
+        user_id_str = data_cb.split(":",1)[1]
+        try:
+            uid_unban = int(user_id_str)
+        except:
+            await cq.answer("Invalid user ID.", show_alert=True)
+            return
+        if uid_unban not in data.get("banned", []):
+            await cq.answer("User not banned.", show_alert=True)
+            return
+        data["banned"].remove(uid_unban)
+        save_data(data)
+        await cq.message.edit(f"✅ User {uid_unban} unbanned.", reply_markup=back_button())
+        await cq.answer()
         return
 
-    # Unknown callback
-    await cq.answer("Unknown command.", show_alert=True)
+    if data_cb == "admin_ban_user":
+        admin_states[uid] = {"action": "ban_user"}
+        await cq.message.edit("❌ Send the Telegram user ID to ban:", reply_markup=back_button())
+        await cq.answer()
+        return
 
-# -------- MESSAGE HANDLER FOR STATES ----------
+    if data_cb == "admin_unban_user":
+        admin_states[uid] = {"action": "unban_user"}
+        await cq.message.edit("✅ Send the Telegram user ID to unban:", reply_markup=back_button())
+        await cq.answer()
+        return
+
+    if data_cb == "admin_broadcast":
+        admin_states[uid] = {"action": "broadcast"}
+        await cq.message.edit("📢 Send the message to broadcast to all users:", reply_markup=back_button())
+        await cq.answer()
+        return
+
+    if data_cb == "admin_bot_stats":
+        user_count = len(data.get("tokens", {}))
+        token_count = sum(len(u.get("tokens", {})) for u in data.get("tokens", {}).values())
+        banned_count = len(data.get("banned", []))
+        txt = (f"📊 Bot Stats:\n\n"
+               f"👥 Users: {user_count}\n"
+               f"🔑 Tokens: {token_count}\n"
+               f"🚫 Banned Users: {banned_count}")
+        await cq.message.edit(txt, reply_markup=back_button())
+        await cq.answer()
+        return
+
+    await cq.answer("Unknown action or expired session.", show_alert=True)
+
+# --------------------------------
+# MESSAGE HANDLER (for inputs)
+# --------------------------------
 @app.on_message(filters.private & filters.create(not_banned_filter))
-async def on_message(_, msg: Message):
+async def msg_handler(_, msg: Message):
     uid = msg.from_user.id
+    state = user_states.get(uid) or admin_states.get(uid)
     text = msg.text or ""
 
-    # Handle back keyword
-    if text.lower() == "back":
-        user_states.pop(uid, None)
-        admin_states.pop(uid, None)
-        await cmd_start(_, msg)
+    if not state:
+        await msg.reply("❓ Please use the buttons to interact with the bot.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="start")]]))
         return
 
-    state = user_states.get(uid)
-    admin_state = admin_states.get(uid)
+    action = state.get("action")
 
-    if state:
-        action = state.get("action")
+    if action == "await_add_token":
+        token = text.strip()
+        # Validate token by fetching username
+        async with aiohttp.ClientSession() as session:
+            st, resp = await gh_request(session, "GET", "https://api.github.com/user", token)
+            if st != 200 or "login" not in resp:
+                await msg.reply("❌ Invalid token or API error. Try again or press Back.", reply_markup=back_button())
+                return
+            username = resp["login"]
+        # Save token
+        urec = data["tokens"].setdefault(str(uid), {"tokens": {}, "active": None, "first_name": msg.from_user.first_name or ""})
+        urec["tokens"][token] = {"username": username}
+        if not urec.get("active"):
+            urec["active"] = token
+        save_data(data)
+        user_states.pop(uid, None)
+        await msg.reply(f"✅ Token added for user: {username}\nActive token switched to this if none set.", reply_markup=back_button())
+        return
 
-        if action == "awaiting_add_token":
-            token = text.strip()
-            # Validate token by fetching user info
-            async with aiohttp.ClientSession() as session:
-                st, user = await gh_request(session, "GET", "https://api.github.com/user", token)
-                if st != 200:
-                    await msg.reply("❌ Invalid token. Try again or send 'Back' to cancel.", reply_markup=make_back_keyboard())
-                    return
-                username = user.get("login")
-                if not username:
-                    await msg.reply("❌ Could not fetch username from token. Try again or send 'Back' to cancel.", reply_markup=make_back_keyboard())
-                    return
+    if action == "search_user":
+        username = extract_github_username(text)
+        if not username:
+            await msg.reply("❌ Invalid GitHub username or URL. Try again or press Back.", reply_markup=back_button())
+            return
+        async with aiohttp.ClientSession() as session:
+            st, repos = await gh_request(session, "GET", f"https://api.github.com/users/{username}/repos?per_page=100")
+            if st != 200:
+                await msg.reply("❌ User not found or API error. Try again or press Back.", reply_markup=back_button())
+                return
+            if not repos:
+                await msg.reply("⚠️ No repos found for this user.", reply_markup=back_button())
+                return
+            # Save username for pagination
+            user_states[uid] = {"action": "search_user", "username": username}
+            # Show first page repos
+            await send_user_repos(msg, username, 0)
+        return
 
-            # Save token for user
-            data.setdefault("tokens", {})
-            rec = data["tokens"].setdefault(str(uid), {"first_name": msg.from_user.first_name or "", "tokens": {}, "active": None})
-            rec["tokens"][token] = {"username": username}
-            rec["active"] = token
+    if action == "search_repo":
+        keyword = text.strip()
+        if not keyword:
+            await msg.reply("❌ Send a keyword to search or press Back.", reply_markup=back_button())
+            return
+        user_states[uid] = {"action": "search_repo", "search_keyword": keyword}
+        await send_search_repos(msg, keyword, 0)
+        return
+
+    if action == "gist_create":
+        content = text.strip()
+        rec = data.get("tokens", {}).get(str(uid), {})
+        token = rec.get("active")
+        if not token:
+            await msg.reply("❌ No active token found. Add and switch tokens first.", reply_markup=back_button())
+            user_states.pop(uid, None)
+            return
+        try:
+            gist_files = json.loads(content)
+            if not isinstance(gist_files, dict):
+                raise ValueError
+        except:
+            gist_files = {"file1.txt": {"content": content}}
+
+        post_data = {
+            "files": gist_files,
+            "public": True,
+            "description": "Created by Spilux GitHub Bot"
+        }
+        async with aiohttp.ClientSession() as session:
+            st, resp = await gh_request(session, "POST", "https://api.github.com/gists", token, json=post_data)
+            if st != 201:
+                await msg.reply(f"❌ Failed to create gist (status {st}).", reply_markup=back_button())
+                user_states.pop(uid, None)
+                return
+            url = resp.get("html_url", "N/A")
+            await msg.reply(f"✅ Gist created: {url}", reply_markup=back_button())
+            user_states.pop(uid, None)
+        return
+
+    if action == "upload_zip":
+        if not msg.document or not msg.document.file_name.endswith(".zip"):
+            await msg.reply("❌ Please send a ZIP file to upload.", reply_markup=back_button())
+            return
+        rec = data.get("tokens", {}).get(str(uid), {})
+        token = rec.get("active")
+        if not token:
+            await msg.reply("❌ No active token. Add/switch tokens first.", reply_markup=back_button())
+            user_states.pop(uid, None)
+            return
+        zip_path = await msg.download()
+        user_states[uid] = {"action": "upload_zip_repo", "zip_path": zip_path}
+        await msg.reply("📝 Now send the full repo name (username/reponame) to upload ZIP to.", reply_markup=back_button())
+        return
+
+    if action == "upload_zip_repo":
+        full_name = text.strip()
+        zip_path = state.get("zip_path")
+        rec = data.get("tokens", {}).get(str(uid), {})
+        token = rec.get("active")
+        if not token or not zip_path:
+            await msg.reply("❌ Missing data. Please start again.", reply_markup=back_button())
+            user_states.pop(uid, None)
+            return
+        await msg.reply(f"📤 Uploading ZIP contents to `{full_name}` repo...")
+        await upload_zip_contents(msg, full_name, zip_path, token)
+        user_states.pop(uid, None)
+        return
+
+    if action == "star_repo":
+        full_name = text.strip()
+        rec = data.get("tokens", {}).get(str(uid), {})
+        token = rec.get("active")
+        if not token:
+            await msg.reply("❌ No active token to star repo.", reply_markup=back_button())
+            user_states.pop(uid, None)
+            return
+        async with aiohttp.ClientSession() as session:
+            st, _ = await gh_request(session, "PUT", f"https://api.github.com/user/starred/{full_name}", token, headers={"Content-Length": "0"})
+            if st == 204:
+                await msg.reply(f"⭐ Starred repo {full_name} successfully.", reply_markup=back_button())
+            else:
+                await msg.reply(f"❌ Failed to star repo (status {st}).", reply_markup=back_button())
+        user_states.pop(uid, None)
+        return
+
+    # Admin actions input
+    if uid in ADMINS:
+        if action == "ban_user":
+            try:
+                to_ban = int(text.strip())
+            except:
+                await msg.reply("❌ Invalid user ID. Try again or press Back.", reply_markup=back_button())
+                return
+            if to_ban in data.get("banned", []):
+                await msg.reply("User already banned.", reply_markup=back_button())
+                admin_states.pop(uid, None)
+                return
+            data.setdefault("banned", []).append(to_ban)
             save_data(data)
-            user_states.pop(uid, None)
-            await msg.reply(f"✅ Token saved and activated for GitHub user `{username}`.", reply_markup=make_back_keyboard())
+            await msg.reply(f"✅ User {to_ban} banned.", reply_markup=back_button())
+            admin_states.pop(uid, None)
             return
 
-        if action == "awaiting_search_user":
-            username = extract_github_username_from_text(text.strip())
-            if not username:
-                await msg.reply("❌ Invalid GitHub username or URL. Send again or 'Back' to cancel.", reply_markup=make_back_keyboard())
+        if action == "unban_user":
+            try:
+                to_unban = int(text.strip())
+            except:
+                await msg.reply("❌ Invalid user ID. Try again or press Back.", reply_markup=back_button())
                 return
-            user_states.pop(uid, None)
-            # Fetch user's public repos
-            async with aiohttp.ClientSession() as session:
-                st, repos = await gh_request(session, "GET", f"https://api.github.com/users/{username}/repos?per_page=50")
-                if st != 200:
-                    await msg.reply("❌ Failed to fetch user repos.", reply_markup=make_back_keyboard())
-                    return
-                if not repos:
-                    await msg.reply("⚠️ User has no public repositories.", reply_markup=make_back_keyboard())
-                    return
-                kb = []
-                for r in repos:
-                    full_name = r.get("full_name")
-                    kb.append([InlineKeyboardButton(r.get("name"), callback_data=f"searchuser_repo:{full_name}")])
-                kb.append([InlineKeyboardButton("◀️ Back", callback_data="start_back")])
-                await msg.reply(f"Repositories of user `{username}`:", reply_markup=InlineKeyboardMarkup(kb))
-            return
-
-        if action == "awaiting_search_repo":
-            keyword = text.strip()
-            if not keyword:
-                await msg.reply("❌ Please send a keyword or 'Back' to cancel.", reply_markup=make_back_keyboard())
-                return
-            user_states.pop(uid, None)
-            async with aiohttp.ClientSession() as session:
-                st, result = await gh_request(session, "GET", f"https://api.github.com/search/repositories?q={keyword}&per_page=20")
-                if st != 200:
-                    await msg.reply("❌ Search failed.", reply_markup=make_back_keyboard())
-                    return
-                items = result.get("items", [])
-                if not items:
-                    await msg.reply("⚠️ No repositories found for that keyword.", reply_markup=make_back_keyboard())
-                    return
-                kb = []
-                for r in items:
-                    full_name = r.get("full_name")
-                    kb.append([InlineKeyboardButton(r.get("name"), callback_data=f"searchrepo_repo:{full_name}")])
-                kb.append([InlineKeyboardButton("◀️ Back", callback_data="start_back")])
-                await msg.reply(f"Repositories matching `{keyword}`:", reply_markup=InlineKeyboardMarkup(kb))
-            return
-
-        if action == "awaiting_gist_create":
-            content = text.strip()
-            if not content:
-                await msg.reply("❌ Send gist content or 'Back' to cancel.", reply_markup=make_back_keyboard())
-                return
-            # Create gist with active token
-            rec = data.get("tokens", {}).get(str(uid), {})
-            token = rec.get("active")
-            if not token:
-                await msg.reply("❌ No active token. Add one first.", reply_markup=make_back_keyboard())
-                return
-            user_states.pop(uid, None)
-            async with aiohttp.ClientSession() as session:
-                payload = {
-                    "files": {
-                        "file1.txt": {"content": content}
-                    },
-                    "public": True,
-                    "description": "Created by Telegram Bot"
-                }
-                st, resp = await gh_request(session, "POST", "https://api.github.com/gists", token, json=payload)
-                if st != 201:
-                    await msg.reply("❌ Failed to create gist.", reply_markup=make_back_keyboard())
-                    return
-                gist_url = resp.get("html_url")
-                await msg.reply(f"✅ Gist created: {gist_url}", reply_markup=make_back_keyboard())
-            return
-
-        if action == "awaiting_zip_upload":
-            # Placeholder: you can implement ZIP upload to GitHub repo here
-            await msg.reply("ZIP upload feature is not implemented yet.\nSend 'Back' to cancel.", reply_markup=make_back_keyboard())
-            return
-
-        if action == "admin_awaiting_create_repo":
-            repo_name = text.strip()
-            if not repo_name:
-                await msg.reply("❌ Send a valid repository name or 'Back' to cancel.", reply_markup=make_back_keyboard())
-                return
-            target_uid = admin_state.get("target_uid")
-            user_rec = data.get("tokens", {}).get(target_uid, {})
-            token = user_rec.get("active")
-            if not token:
-                await msg.reply("❌ Target user has no active token.", reply_markup=make_back_keyboard())
+            if to_unban not in data.get("banned", []):
+                await msg.reply("User not banned.", reply_markup=back_button())
                 admin_states.pop(uid, None)
                 return
-            # Create repo via API
-            async with aiohttp.ClientSession() as session:
-                payload = {
-                    "name": repo_name,
-                    "auto_init": True,
-                    "private": False
-                }
-                st, resp = await gh_request(session, "POST", "https://api.github.com/user/repos", token, json=payload)
-                if st != 201:
-                    await msg.reply(f"❌ Failed to create repo: {resp}", reply_markup=make_back_keyboard())
-                    admin_states.pop(uid, None)
-                    return
-                await msg.reply(f"✅ Repo `{repo_name}` created for user {target_uid}.", reply_markup=make_back_keyboard())
-                admin_states.pop(uid, None)
+            data["banned"].remove(to_unban)
+            save_data(data)
+            await msg.reply(f"✅ User {to_unban} unbanned.", reply_markup=back_button())
+            admin_states.pop(uid, None)
             return
 
-    # If no states matched, ignore or show main
-    # Just ignore other messages for now
-    return
+        if action == "broadcast":
+            broadcast_msg = text.strip()
+            admin_states.pop(uid, None)
+            count_sent = 0
+            for user_id_str in data.get("tokens", {}).keys():
+                try:
+                    await app.send_message(int(user_id_str), f"📢 Broadcast from Admin:\n\n{broadcast_msg}")
+                    count_sent += 1
+                except:
+                    pass
+            await msg.reply(f"✅ Broadcast sent to {count_sent} users.", reply_markup=back_button())
+            return
 
-# --------- RUN APP ----------
-if __name__ == "__main__":
-    print("Bot is running...")
-    app.run()
+    # Unknown input
+    await msg.reply("❓ Please use the buttons to interact with the bot.", reply_markup=back_button())
+
+# --------------------------------
+# UTILITIES
+# --------------------------------
+async def send_user_repos(dest, username, page):
+    async with aiohttp.ClientSession() as session:
+        st, repos = await gh_request(session, "GET", f"https://api.github.com/users/{username}/repos?per_page=100")
+        if st != 200 or not repos:
+            await dest.edit("❌ Failed to fetch user repos or none found.", reply_markup=back_button())
+            return
+        items = [{"label": r.get("name"), "data": r.get("full_name")} for r in repos]
+        kb = paginate_buttons(items, f"userrepo_page:{username}|", page)
+        await dest.edit(f"📚 Repositories for user <b>{username}</b>:", reply_markup=kb)
+
+async def send_search_repos(dest, keyword, page):
+    async with aiohttp.ClientSession() as session:
+        st, resp = await gh_request(session, "GET", f"https://api.github.com/search/repositories?q={keyword}&per_page=50")
+        if st != 200:
+            await dest.edit("❌ GitHub API error.", reply_markup=back_button())
+            return
+        items_raw = resp.get("items", [])
+        if not items_raw:
+            await dest.edit("⚠️ No repositories found.", reply_markup=back_button())
+            return
+        # Store keyword in user state for pagination
+        uid = dest.chat.id
+        user_states[uid] = {"action": "search_repo", "search_keyword": keyword}
+        items = [{"label": r.get("full_name"), "data": r.get("full_name")} for r in items_raw]
+        kb = paginate_buttons(items, "searchrepo_page:", page)
+        await dest.edit(f"🔎 Search results for: <b>{keyword}</b>", reply_markup=kb)
+
+async def send_repo_zip(cq: CallbackQuery, full_name: str, user_id: int, token_override=None):
+    rec = data.get("tokens", {}).get(str(user_id), {})
+    token = token_override or rec.get("active")
+    if not token:
+        await cq.message.edit("❌ No active token. Add and switch token first.", reply_markup=back_button())
+        return
+    owner, repo = full_name.split("/")
+    zip_url = f"https://api.github.com/repos/{owner}/{repo}/zipball"
+    headers = {"Authorization": f"token {token}", "User-Agent": "Spilux-GitHub-Bot"}
+
+    await cq.message.edit(f"⏳ Downloading ZIP for `{full_name}`...")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(zip_url, headers=headers) as r:
+                if r.status != 200:
+                    await cq.message.edit(f"❌ Failed to download ZIP (status {r.status})", reply_markup=back_button())
+                    return
+                zip_bytes = await r.read()
+    except Exception as e:
+        await cq.message.edit(f"❌ Download error: {e}", reply_markup=back_button())
+        return
+
+    try:
+        await cq.message.reply_document(zip_bytes, filename=f"{repo}.zip", caption=f"📥 Repo ZIP: {full_name}")
+        await cq.message.edit("✅ Here is your ZIP file.", reply_markup=back_button())
+    except Exception as e:
+        await cq.message.edit(f"❌ Failed to send ZIP: {e}", reply_markup=back_button())
+
+async def upload_zip_contents(msg, full_name, zip_path, token):
+    import zipfile
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            files_to_upload = {}
+            for name in zf.namelist():
+                if name.endswith("/"):
+                    continue
+                with zf.open(name) as f:
+                    files_to_upload[name] = f.read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        await msg.reply(f"❌ Failed to read ZIP: {e}", reply_markup=back_button())
+        return
+
+    if "/" not in full_name:
+        await msg.reply("❌ Repo name format invalid. Use username/reponame.", reply_markup=back_button())
+        return
+
+    owner, repo = full_name.split("/", 1)
+
+    async with aiohttp.ClientSession() as session:
+        # Get branch ref
+        st, ref_data = await gh_request(session, "GET", f"https://api.github.com/repos/{full_name}/git/refs/heads/main", token)
+        if st != 200:
+            st, ref_data = await gh_request(session, "GET", f"https://api.github.com/repos/{full_name}/git/refs/heads/master", token)
+            if st != 200:
+                await msg.reply("❌ Repo branch 'main' or 'master' not found.", reply_markup=back_button())
+                return
+
+        commit_sha = ref_data.get("object", {}).get("sha")
+        if not commit_sha:
+            await msg.reply("❌ Failed to get latest commit SHA.", reply_markup=back_button())
+            return
+
+        # Get tree SHA from commit
+        st, commit_data = await gh_request(session, "GET", f"https://api.github.com/repos/{full_name}/git/commits/{commit_sha}", token)
+        if st != 200:
+            await msg.reply("❌ Failed to get commit data.", reply_markup=back_button())
+            return
+        tree_sha = commit_data.get("tree", {}).get("sha")
+        if not tree_sha:
+            await msg.reply("❌ Failed to get tree SHA.", reply_markup=back_button())
+            return
+
+        # Create blobs
+        blobs = []
+        for filename, content in files_to_upload.items():
+            st, blob_resp = await gh_request(session, "POST", f"https://api.github.com/repos/{full_name}/git/blobs", token,
+                                            json={"content": content, "encoding": "utf-8"})
+            if st != 201:
+                await msg.reply(f"❌ Failed to create blob for {filename}.", reply_markup=back_button())
+                return
+            blobs.append({"path": filename, "mode": "100644", "type": "blob", "sha": blob_resp.get("sha")})
+
+        # Create new tree
+        st, tree_resp = await gh_request(session, "POST", f"https://api.github.com/repos/{full_name}/git/trees", token,
+                                        json={"base_tree": tree_sha, "tree": blobs})
+        if st != 201:
+            await msg.reply("❌ Failed to create new tree.", reply_markup=back_button())
+            return
+        new_tree_sha = tree_resp.get("sha")
+
+        # Create new commit
+        commit_message = f"Upload ZIP files via bot"
+        st, new_commit = await gh_request(session, "POST", f"https://api.github.com/repos/{full_name}/git/commits", token,
+                                        json={"message": commit_message, "tree": new_tree_sha, "parents": [commit_sha]})
+        if st != 201:
+            await msg.reply("❌ Failed to create commit.", reply_markup=back_button())
+            return
+        new_commit_sha = new_commit.get("sha")
+
+        # Update branch ref
+        st, update_ref = await gh_request(session, "PATCH", f"https://api.github.com/repos/{full_name}/git/refs/heads/main", token,
+                                        json={"sha": new_commit_sha})
+        if st != 200:
+            # try master branch
+            st, update_ref = await gh_request(session, "PATCH", f"https://api.github.com/repos/{full_name}/git/refs/heads/master", token,
+                                            json={"sha": new_commit_sha})
+            if st != 200:
+                await msg.reply("❌ Failed to update branch reference.", reply_markup=back_button())
+                return
+
+        await msg.reply("✅ ZIP contents uploaded successfully!", reply_markup=back_button())
+
+async def random_repo(cq: CallbackQuery):
+    async with aiohttp.ClientSession() as session:
+        st, resp = await gh_request(session, "GET", "https://api.github.com/search/repositories?q=stars:>10000&sort=stars&order=desc&per_page=100")
+        if st != 200:
+            await cq.message.edit("❌ Failed to fetch trending repos.", reply_markup=back_button())
+            return
+        import random
+        repo = random.choice(resp.get("items", []))
+        full_name = repo.get("full_name")
+        description = repo.get("description", "No description")
+        stars = repo.get("stargazers_count", 0)
+        forks = repo.get("forks_count", 0)
+        html_url = repo.get("html_url")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📥 Download ZIP", callback_data=f"myrepo:{full_name}")],
+            [InlineKeyboardButton("🍴 Fork Repo", callback_data=f"forkrepo:{full_name}")],
+            [InlineKeyboardButton("◀️ Back", callback_data="start")]
+        ])
+        txt = (f"🎲 Random Popular Repo:\n\n"
+               f"<b>{full_name}</b>\n"
+               f"{description}\n\n"
+               f"⭐ Stars: {stars} | 🍴 Forks: {forks}\n"
+               f"<a href='{html_url}'>GitHub Link</a>")
+        await cq.message.edit(txt, reply_markup=kb)
+
+async def fork_repo(cq: CallbackQuery, full_name, user_id):
+    rec = data.get("tokens", {}).get(str(user_id), {})
+    token = rec.get("active")
+    if not token:
+        await cq.answer("No active token.", show_alert=True)
+        return
+    async with aiohttp.ClientSession() as session:
+        st, _ = await gh_request(session, "POST", f"https://api.github.com/repos/{full_name}/forks", token)
+        if st == 202:
+            await cq.answer("🍴 Fork started. Check your repos after some time.", show_alert=True)
+        else:
+            await cq.answer(f"❌ Failed to fork repo (status {st}).", show_alert=True)
+
+async def gh_stats(cq: CallbackQuery):
+    uid = cq.from_user.id
+    rec = data.get("tokens", {}).get(str(uid), {})
+    token = rec.get("active")
+    if not token:
+        await cq.message.edit("❌ No active token.", reply_markup=back_button())
+        return
+    async with aiohttp.ClientSession() as session:
+        st, resp = await gh_request(session, "GET", "https://api.github.com/rate_limit", token)
+        if st != 200:
+            await cq.message.edit("❌ Failed to get stats.", reply_markup=back_button())
+            return
+        core = resp.get("rate", {})
+        txt = (f"📊 GitHub API Rate Limit:\n\n"
+               f"Limit: {core.get('limit')}\n"
+               f"Remaining: {core.get('remaining')}\n"
+               f"Reset: <code>{core.get('reset')}</code>")
+        await cq.message.edit(txt, reply_markup=back_button())
+
+# --------------------------------
+# ADMIN PANEL FUNCTIONS
+# --------------------------------
+async def admin_list_users(cq: CallbackQuery, page: int):
+    user_tokens = data.get("tokens", {})
+    if not user_tokens:
+        await cq.message.edit("No users found.", reply_markup=back_button())
+        return
+    items = []
+    for ustr, info in user_tokens.items():
+        first_name = info.get("first_name", "unknown")
+        token_count = len(info.get("tokens", {}))
+        items.append({"label": f"{first_name} (ID: {ustr}) [{token_count} tokens]", "data": ustr})
+    kb = paginate_buttons(items, "admin_view_user", page)
+    await cq.message.edit("👥 Registered Users:", reply_markup=kb)
+
+async def admin_view_user_repos(cq: CallbackQuery, user_id_str: str, page: int):
+    rec = data.get("tokens", {}).get(user_id_str)
+    if not rec:
+        await cq.message.edit("User not found.", reply_markup=back_button())
+        return
+    tokens = rec.get("tokens", {})
+    active_token = rec.get("active")
+    if not tokens:
+        await cq.message.edit("User has no saved tokens.", reply_markup=back_button())
+        return
+    token = tokens.get(active_token)
+    if not active_token:
+        token = next(iter(tokens), None)
+        if not token:
+            await cq.message.edit("User has no active token.", reply_markup=back_button())
+            return
+        active_token = token
+    async with aiohttp.ClientSession() as session:
+        st, repos = await gh_request(session, "GET", "https://api.github.com/user/repos?per_page=100", active_token)
+        if st != 200:
+            await cq.message.edit("Failed to fetch user repos or token invalid.", reply_markup=back_button())
+            return
+        if not repos:
+            await cq.message.edit("No repos found for this user.", reply_markup=back_button())
+            return
+        items = [{"label": r.get("name"), "data": r.get("full_name")} for r in repos]
+        kb = paginate_buttons(items, f"admin_view_user_repopage:{user_id_str}|", page)
+        await cq.message.edit(f"Repos for user {rec.get('first_name')} (ID {user_id_str}):", reply_markup=kb)
+
+# --------------------------------
+# RUN
+# --------------------------------
+print("Bot is running...")
+app.run()
