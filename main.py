@@ -96,22 +96,32 @@ async def cmd_start(_, msg: Message):
     rec.setdefault("first_name", msg.from_user.first_name or "")
     save_data(data)
 
-    kb = InlineKeyboardMarkup([
+    buttons = [
         [InlineKeyboardButton("🔑 Add Token", callback_data="add_token")],
         [InlineKeyboardButton("🔁 Switch Token", callback_data="switch_token_menu")],
         [InlineKeyboardButton("📂 My Repos", callback_data="list_repos")],
         [InlineKeyboardButton("📤 Upload ZIP to Repo", callback_data="upload_zip_repo")],
-        [InlineKeyboardButton("🔍 Search GitHub User", callback_data="search_user"),
-         InlineKeyboardButton("🔎 Search Repos (keyword)", callback_data="search_repo")],
-        [InlineKeyboardButton("📈 Trending", callback_data="trending"),
-         InlineKeyboardButton("🎲 Random Repo", callback_data="random_repo")],
-        [InlineKeyboardButton("🧾 Gist Create", callback_data="gist_create"),
-         InlineKeyboardButton("📊 GH Stats", callback_data="ghstats")],
-    ])
-    # Admin area button
+        [
+            InlineKeyboardButton("🔍 Search GitHub User", callback_data="search_user"),
+            InlineKeyboardButton("🔎 Search Repos (keyword)", callback_data="search_repo")
+        ],
+        [
+            InlineKeyboardButton("📈 Trending", callback_data="trending"),
+            InlineKeyboardButton("🎲 Random Repo", callback_data="random_repo")
+        ],
+        [
+            InlineKeyboardButton("🧾 Gist Create", callback_data="gist_create"),
+            InlineKeyboardButton("📊 GH Stats", callback_data="ghstats")
+        ]
+    ]
+
     if uid in ADMINS:
-        kb.keyboard.append([InlineKeyboardButton("👥 Admin Panel", callback_data="admin_panel")])
+        buttons.append([InlineKeyboardButton("👥 Admin Panel", callback_data="admin_panel")])
+
+    kb = InlineKeyboardMarkup(buttons)
+
     await msg.reply("👋 Welcome — press a button to run a feature.", reply_markup=kb)
+
 
 # ---------- Generic callback for many buttons ----------
 @app.on_callback_query(filters.create(lambda _, __, cq: True))
