@@ -20,7 +20,7 @@ from pyrogram.types import (
 
 API_ID = 20660797          # your Telegram API ID
 API_HASH = "755e5cdf9bade62a75211e7a57f25601"
-BOT_TOKEN = "8448084086:AAEEj7oy4pH3A6uKSALq5T_aog8cXuVx5qQ"
+BOT_TOKEN = "7386897076:AAEfh5_7TOpxMJY7yVEKwaRBIM22c4y1OWU"
 DATA_FILE = "data.json"
 
 ADMINS = {7941175119}     # Telegram user ids of admins
