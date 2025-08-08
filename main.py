@@ -21,10 +21,12 @@ from pyrogram.types import (
 )
 
 # ---------------- CONFIG ----------------
-API_ID=22222258
-API_HASH=4ea7a4f028bed2a8077c65085dddc9c4
-BOT_TOKEN=8222967896:AAH75Zv8EWpQ_Z3Ojwaq0_gzTF1Z6m4YU8I
-ADMINS=7941175119
+import os
+
+API_ID = int(os.getenv("API_ID", "22222258"))
+API_HASH = os.getenv("API_HASH", "4ea7a4f028bed2a8077c65085dddc9c4")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8222967896:AAH75Zv8EWpQ_Z3Ojwaq0_gzTF1Z6m4YU8I")
+ADMINS = [int(x) for x in os.getenv("ADMINS", "7941175119").split(",") if x.strip()]
 DATA_FILE = "data.json"
 ITEMS_PER_PAGE = 6
 # ----------------------------------------
