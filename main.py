@@ -57,6 +57,8 @@ def load_data():
 
 def user_data(uid: int):
     uid_str = str(uid)
+    if "users" not in data:
+        data["users"] = {}  # initialize if missing
     if uid_str not in data["users"]:
         data["users"][uid_str] = {
             "first_name": "",
