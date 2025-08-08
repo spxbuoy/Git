@@ -94,7 +94,7 @@ async def start_menu(_, msg: Message):
     rec.setdefault("first_name", msg.from_user.first_name or "")
     save_data(data)
 
-    kb = InlineKeyboardMarkup([
+    buttons = [
         [InlineKeyboardButton("🔑 Add Token", callback_data="token_add")],
         [InlineKeyboardButton("🔁 Switch Token", callback_data="token_switch_list")],
         [InlineKeyboardButton("🗑 Remove Token", callback_data="token_remove_list")],
@@ -107,11 +107,15 @@ async def start_menu(_, msg: Message):
         [InlineKeyboardButton("🧾 Create Gist", callback_data="gist_create")],
         [InlineKeyboardButton("⭐ Star a Repo", callback_data="star_repo_prompt")],
         [InlineKeyboardButton("📊 GitHub API Stats", callback_data="gh_stats")]
-    ])
+    ]
+
     if uid in ADMINS:
-        kb.keyboard.append([InlineKeyboardButton("👥 Admin Panel", callback_data="admin_panel")])
+        buttons.append([InlineKeyboardButton("👥 Admin Panel", callback_data="admin_panel")])
+
+    kb = InlineKeyboardMarkup(buttons)
 
     await msg.reply("👋 Welcome to Spilux GitHub Bot! Select an option:", reply_markup=kb)
+
 
 # --------------------------------
 # CALLBACK QUERY HANDLER
