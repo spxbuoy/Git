@@ -25,7 +25,7 @@ import os
 
 API_ID = int(os.getenv("API_ID", "20660797"))
 API_HASH = os.getenv("API_HASH", "755e5cdf9bade62a75211e7a57f25601")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8222967896:AAH75Zv8EWpQ_Z3Ojwaq0_gzTF1Z6m4YU8I")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8448084086:AAGT6-0n3g3OkQDYxxlyXdJESsYmjX9_ISA")
 ADMINS = [int(x) for x in os.getenv("ADMINS", "7941175119").split(",") if x.strip()]
 DATA_FILE = "data.json"
 ITEMS_PER_PAGE = 6
