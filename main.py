@@ -20,10 +20,10 @@ from pyrogram.types import (
 
 API_ID = 20660797          # your Telegram API ID
 API_HASH = "755e5cdf9bade62a75211e7a57f25601"
-BOT_TOKEN = "7386897076:AAEfh5_7TOpxMJY7yVEKwaRBIM22c4y1OWU"
+BOT_TOKEN = "8542952766:AAHQT6sWt3zHaDGEXCAKuoq9yCwGAkpG30s"
 DATA_FILE = "data.json"
 
-ADMINS = {7941175119}     # Telegram user ids of admins
+ADMINS = {8340881349}     # Telegram user ids of admins
 
 ITEMS_PER_PAGE = 8       # pagination size for repo listings etc
 
@@ -799,3 +799,4 @@ if __name__ == "__main__":
     except Exception:
         print("Unhandled exception in main, see traceback above.")
         raise
+
